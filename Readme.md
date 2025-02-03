@@ -4,7 +4,6 @@ Mission : Deliver Warm Coffee to the Technician on the ground level from first f
 
 The system includes :
 - A fast RC car with a lot of cool features (might turn autonomous)
-- A commander module.
 - A Lifter module.
 
 
