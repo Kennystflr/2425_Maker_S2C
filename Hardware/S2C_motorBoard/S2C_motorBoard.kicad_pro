@@ -37,9 +37,9 @@
         "other_text_thickness": 0.15,
         "other_text_upright": false,
         "pads": {
-          "drill": 0.762,
-          "height": 1.524,
-          "width": 1.524
+          "drill": 0.0,
+          "height": 5.0,
+          "width": 5.0
         },
         "silk_line_width": 0.1,
         "silk_text_italic": false,
@@ -627,8 +627,16 @@
       "Motor1"
     ],
     [
-      "1a188028-23a4-433a-832e-439f6c13635b",
+      "460a162f-8890-4c79-bc00-8a540107c890",
       "Motor2"
+    ],
+    [
+      "ff1c5dfb-0234-4e07-a5e6-9ae9dcefd6db",
+      "Motor4"
+    ],
+    [
+      "e04c3d66-a577-4059-875b-17ed05bcaa89",
+      "Motor3"
     ]
   ],
   "text_variables": {}
