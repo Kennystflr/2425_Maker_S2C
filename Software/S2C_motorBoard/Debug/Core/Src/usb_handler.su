@@ -1,0 +1,2 @@
+../Core/Src/usb_handler.c:12:16:calculate_checksum	24	static
+../Core/Src/usb_handler.c:20:6:process_received_data	24	static

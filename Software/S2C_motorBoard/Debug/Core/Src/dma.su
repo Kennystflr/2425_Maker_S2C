@@ -1,0 +1,3 @@
+../Core/Src/dma.c:43:6:MX_DMA_Init	16	static
+../Core/Src/dma.c:59:9:CalculateChecksum	24	static
+../Core/Src/dma.c:69:6:Process_UART_DMA_Data	72	dynamic

@@ -1,0 +1,10 @@
+../Core/Src/motor.c:33:7:normalize_angle	16	static
+../Core/Src/motor.c:41:7:shortest_angle_diff	24	static
+../Core/Src/motor.c:49:6:motor_setSpeed	24	static
+../Core/Src/motor.c:68:6:motor_setVehiculeDirection	24	static
+../Core/Src/motor.c:100:6:apply_motor_speeds	40	static
+../Core/Src/motor.c:122:6:control_wheels_with_time	72	static
+../Core/Src/motor.c:163:6:limit_speed_ramp	64	static
+../Core/Src/motor.c:207:6:set_robot_motion	24	static
+../Core/Src/motor.c:222:6:HAL_TIM_PeriodElapsedCallback	32	static
+../Core/Src/motor.c:250:6:motor_test	16	static
