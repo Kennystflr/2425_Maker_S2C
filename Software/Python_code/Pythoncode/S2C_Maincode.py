@@ -1,156 +1,146 @@
 #!/usr/bin/env python3
-"""Suivi de chemin ArUco avec PiCamera
+"""Suivi de chemin **entre deux balises ArUco** (portiques) – PiCamera 2
 
-Ce script détecte des balises ArUco successives pour guider un robot mobile.
-Il calcule en temps réel :
-  • une direction absolue 0–360° (convertie sur 8 bits 0–255)
-  • une vitesse normalisée 0–255 (8 bits)
+### Protection courant/batterie
+Pour éviter un appel de courant brutal :
+* **Vitesse maximale** limitée à `MAX_SPEED` (0 ↔ 1).
+* **Rampe d’accélération** : la variation instantanée ne dépasse pas `SPEED_STEP`
+  par boucle (≈ frame).
 
-La paire d’octets est envoyée sur un port série pour piloter les roues.
-
-Matériel / dépendances :
-  - Raspberry Pi + PiCamera (ou PiCamera2, à adapter)
-  - OpenCV (contrib) ≥ 4.0 : sudo apt install python3-opencv
-  - numpy, pyserial
-
-Méthode :
-  1. Détecter la balise ArUco correspondant au prochain point du chemin.
-  2. Calculer le vecteur image → balise ; en déduire l’angle robot.
-  3. Adapter la vitesse selon la taille apparente de la balise (≈ distance).
-  4. Envoyer les deux octets [direction, vitesse] sur /dev/ttyACM0 (115200 bauds).
-  5. Quand on est suffisamment proche, passer au point suivant.
-
-Notes :
-  • Calibrez l’optique et placez « calibration.npz » (cameraMatrix, distCoeffs)
-    pour la pose 3D si vous en avez besoin.
-  • Modifiez PATH_IDS pour décrire votre itinéraire.
-  • Adaptez la condition « marker_size_px > 200 » au rayon de proximité désiré.
+Trame série : `[0x24, direction_byte, speed_byte, 0x00]`.
 """
 
 import cv2
 import numpy as np
 import time
 import math
-import os
-from picamera.array import PiRGBArray
-from picamera import PiCamera
 import serial
+from picamera2 import Picamera2
 
 # ———————————————————————————————————————————————————————————
-# Paramètres
+# Paramètres utilisateur
 # ———————————————————————————————————————————————————————————
 
-SERIAL_PORT = "/dev/ttyACM0"     # Port série vers contrôleur de moteurs (modifié)
-BAUDRATE    = 115200            # Débit (bit/s)
-ARUCO_DICT  = cv2.aruco.DICT_4X4_50  # Dictionnaire ArUco
-PATH_IDS    = [0, 1, 2, 3, 4]   # Séquence d’ID à suivre
-SEARCH_TURN = 30                # Taux de rotation (°) pendant la recherche
-MIN_SPEED   = 0.2               # Vitesse mini quand la balise est loin
+SERIAL_PORT = "/dev/ttyACM0"
+BAUDRATE    = 115200
+ARUCO_DICT  = cv2.aruco.DICT_4X4_50
+PATH_GATES  = [(0, 1), (2, 3), (4, 5)]      # (gauche, droite)
+
+SEARCH_TURN = 30.0     # °/s
+MIN_SPEED   = 0.2      # Vitesse mini normalisée
+PASS_SPEED  = 0.4      # Vitesse overshoot (≤ MAX_SPEED)
+MAX_SPEED   = 0.6      # Limite hard pour protéger la batterie
+SPEED_STEP  = 0.05     # Rampe : Δv max par boucle
+NEAR_THRESH_DIAG_PX = 200
 
 # ———————————————————————————————————————————————————————————
-# Utilitaires de conversion
+# Utilitaires
 # ———————————————————————————————————————————————————————————
 
-def angle_to_byte(angle_deg: float) -> int:
-    """Convertit un angle 0–360° vers 0–255 (8 bits)."""
-    angle_deg %= 360.0
-    return int(angle_deg / 360.0 * 255)
+def angle_to_byte(angle: float) -> int:
+    return int((angle % 360) / 360 * 255)
 
-def speed_to_byte(speed_norm: float) -> int:
-    """Convertit une vitesse normalisée 0–1 vers 0–255 (8 bits)."""
-    speed_norm = max(0.0, min(speed_norm, 1.0))
-    return int(speed_norm * 255)
+def speed_to_byte(v: float) -> int:
+    return int(max(0.0, min(v, 1.0)) * 255)
 
-def send_command(ser, direction_deg: float, speed_norm: float):
-    """Envoie deux octets [dir, speed] sur le port série."""
-    packet = bytes((angle_to_byte(direction_deg), speed_to_byte(speed_norm)))
+def send_command(ser: serial.Serial, dir_deg: float, speed: float):
+    packet = bytearray([0x24, angle_to_byte(dir_deg), speed_to_byte(speed), 0x00])
     ser.write(packet)
 
 # ———————————————————————————————————————————————————————————
-# Vision : détection et navigation
-# ———————————————————————————————————————————————————————————
 
-def vec_angle(x: float, y: float) -> float:
-    """Angle (°) entre le vecteur (x,y) et l’axe avant du robot (vers +y)."""
-    angle_rad = math.atan2(x, y)  # Attention : argument inverse pour atan2
-    angle_deg = math.degrees(angle_rad)
-    if angle_deg < 0:
-        angle_deg += 360
-    return angle_deg
-
-def load_calibration(path="calibration.npz"):
-    if os.path.exists(path):
-        data = np.load(path)
-        return data["cameraMatrix"], data["distCoeffs"]
-    return None, None
+def vec_angle(x, y):
+    a = math.degrees(math.atan2(x, y))
+    return a + 360 if a < 0 else a
 
 # ———————————————————————————————————————————————————————————
 # Boucle principale
 # ———————————————————————————————————————————————————————————
 
 def main():
-    # Initialisations hardwares
     ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=0.05)
-    camera = PiCamera()
-    camera.resolution = (640, 480)
-    camera.framerate = 30
-    raw = PiRGBArray(camera, size=camera.resolution)
-    time.sleep(0.2)  # Laisser le temps au capteur
+    cam = Picamera2()
+    cam.configure(cam.create_preview_configuration(main={"format": "RGB888", "size": (640, 480)}))
+    cam.start()
+    time.sleep(0.2)
 
-    aruco_dict  = cv2.aruco.getPredefinedDictionary(ARUCO_DICT)
-    parameters  = cv2.aruco.DetectorParameters_create()
+    aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT)
+    params = cv2.aruco.DetectorParameters()
 
-    cam_matrix, dist_coeffs = load_calibration()
+    gate_idx = 0
+    overshoot = False
+    current_speed = 0.0
+    search_direction = 1
 
-    current_goal_idx = 0
+    try:
+        while True:
+            start_time = time.time()
+            img = cam.capture_array()
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            corners, ids, _ = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=params)
+            ids = ids.flatten() if ids is not None else []
 
-    for frame in camera.capture_continuous(raw, format="bgr", use_video_port=True):
-        img  = frame.array
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            left_id, right_id = PATH_GATES[gate_idx]
+            left_vis = left_id in ids
+            right_vis = right_id in ids
 
-        corners, ids, _ = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=parameters)
-
-        if ids is not None:
-            ids = ids.flatten()
-            goal_id = PATH_IDS[current_goal_idx]
-
-            if goal_id in ids:
-                i = np.where(ids == goal_id)[0][0]
-                marker_corners = corners[i][0]  # (4,2)
-
-                # Centre de la balise dans l’image
-                cx = marker_corners[:, 0].mean()
-                cy = marker_corners[:, 1].mean()
-
-                # Vecteur image → balise, référentiel image : origine centre
-                vx = cx - img.shape[1] / 2
-                vy = (img.shape[0] / 2) - cy  # inverser y : haut positif → avant
-
-                direction_deg = vec_angle(vx, vy)
-
-                # Taille apparente : diagonale px
-                diag_px = np.linalg.norm(marker_corners[0] - marker_corners[2])
-                speed_norm = np.clip(1.0 - diag_px / 400.0, MIN_SPEED, 1.0)
-
-                send_command(ser, direction_deg, speed_norm)
-
-                # Passage à la prochaine balise quand on est proche
-                if diag_px > 200 and current_goal_idx < len(PATH_IDS) - 1:
-                    current_goal_idx += 1
+            if overshoot:
+                target_speed = PASS_SPEED
+                dir_deg = 0.0
+                if not (left_vis or right_vis):
+                    overshoot = False
+                    if gate_idx < len(PATH_GATES) - 1:
+                        gate_idx += 1
+            elif left_vis and right_vis:
+                li = np.where(ids == left_id)[0][0]
+                ri = np.where(ids == right_id)[0][0]
+                lc, rc = corners[li][0], corners[ri][0]
+                if lc.mean(axis=0)[0] < rc.mean(axis=0)[0]:  # Validate left-right order
+                    midx, midy = np.vstack((lc, rc)).mean(axis=0)
+                    dir_deg = vec_angle(midx - img.shape[1]/2, img.shape[0]/2 - midy)
+                    d_mean = (np.linalg.norm(lc[0]-lc[2]) + np.linalg.norm(rc[0]-rc[2]))/2
+                    target_speed = np.clip(1.0 - d_mean/400.0, MIN_SPEED, MAX_SPEED)
+                    if d_mean < NEAR_THRESH_DIAG_PX:
+                        overshoot = True
+                else:
+                    dir_deg = SEARCH_TURN * search_direction
+                    target_speed = MIN_SPEED
+                    search_direction *= -1
             else:
-                # Balise cible non vue → rotation lente
-                send_command(ser, SEARCH_TURN, MIN_SPEED)
-        else:
-            # Aucune balise → arrêt
-            send_command(ser, 0, 0)
+                dir_deg = SEARCH_TURN * search_direction
+                target_speed = MIN_SPEED
+                search_direction *= -1
 
-        raw.truncate(0)  # Réinitialiser le buffer pour la trame suivante
+            # Speed ramp
+            if target_speed > current_speed + SPEED_STEP:
+                current_speed += SPEED_STEP
+            elif target_speed < current_speed - SPEED_STEP:
+                current_speed -= SPEED_STEP
+            else:
+                current_speed = target_speed
+            current_speed = max(MIN_SPEED if current_speed > 0 else 0.0, min(current_speed, MAX_SPEED))
+
+            send_command(ser, dir_deg, current_speed)
+
+            # Optional visualization
+            cv2.aruco.drawDetectedMarkers(img, corners, ids)
+            cv2.imshow("Camera", img)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+            # Dynamic sleep
+            elapsed = time.time() - start_time
+            sleep_time = max(0.0, 0.05 - elapsed)
+            time.sleep(sleep_time)
+
+    finally:
+        send_command(ser, 0, 0)
+        ser.close()
+        cam.stop()
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        # Arrêt d’urgence
-        with serial.Serial(SERIAL_PORT, BAUDRATE, timeout=0.05) as ser:
-            send_command(ser, 0, 0)
-        print("Interrompu par l’utilisateur.")
+        pass  # Cleanup handled in finally block
