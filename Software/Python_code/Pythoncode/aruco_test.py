@@ -1,49 +1,63 @@
-from picamera2 import Picamera2
 import cv2
+import cv2.aruco as aruco
 import numpy as np
+from picamera2 import Picamera2
+from libcamera import Transform
 
-# Initialiser la caméra
-picam2 = Picamera2()
-picam2.preview_configuration.main.size = (640, 480)
-picam2.preview_configuration.main.format = "RGB888"
-picam2.configure("preview")
-picam2.start()
+def detect_aruco():
+    # Initialiser la Picamera2
+    picam2 = Picamera2()
+    config = picam2.create_preview_configuration(
+        main={"size": (640, 480)},
+        transform=Transform(hflip=False, vflip=False)
+    )
+    picam2.configure(config)
+    picam2.start()
 
-# Charger le dictionnaire Aruco
-aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_4X4_50)  # Choisis ton type ici
-parameters = cv2.aruco.DetectorParameters_create()
+    # Charger le dictionnaire ArUco
+    aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_6X6_250)
+    parameters = aruco.DetectorParameters()
+    
+    # Créer le détecteur
+    detector = aruco.ArucoDetector(aruco_dict, parameters)
 
-print("Démarrage de la détection Aruco... Appuie sur 'q' pour quitter.")
+    try:
+        while True:
+            # Capturer l'image depuis la Picamera2
+            frame = picam2.capture_array()
+            
+            # Convertir l'image en BGR (format compatible OpenCV)
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            
+            # Convertir en niveaux de gris
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            
+            # Détecter les marqueurs ArUco
+            corners, ids, rejected = detector.detectMarkers(gray)
+            
+            # Dessiner les marqueurs détectés
+            if ids is not None:
+                aruco.drawDetectedMarkers(frame, corners, ids)
+                
+                # Afficher les IDs des marqueurs
+                for i, corner in enumerate(corners):
+                    # Position pour afficher l'ID
+                    pos = corner[0][0]
+                    cv2.putText(frame, str(ids[i][0]), 
+                              (int(pos[0]), int(pos[1] - 10)),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            
+            # Afficher l'image
+            cv2.imshow("ArUco Detection", frame)
+            
+            # Quitter avec la touche 'q'
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+                
+    finally:
+        # Libérer les ressources
+        picam2.stop()
+        cv2.destroyAllWindows()
 
-while True:
-    # Capture d'une image
-    frame = picam2.capture_array()
-
-    # Convertir en niveaux de gris pour la détection
-    gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-
-    # Détection des marqueurs
-    corners, ids, rejected = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=parameters)
-
-    # Si on détecte des marqueurs
-    if ids is not None:
-        # Dessiner les marqueurs détectés
-        cv2.aruco.drawDetectedMarkers(frame, corners, ids)
-        for i in range(len(ids)):
-            c = corners[i][0]
-            # Afficher l'ID à côté du tag
-            center_x = int(np.mean(c[:, 0]))
-            center_y = int(np.mean(c[:, 1]))
-            cv2.putText(frame, f"ID: {ids[i][0]}", (center_x - 20, center_y - 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-    # Afficher l'image
-    cv2.imshow("Aruco Detection", frame)
-
-    # Quitter avec la touche 'q'
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-# Libérer les ressources
-cv2.destroyAllWindows()
-picam2.close()
+if __name__ == "__main__":
+    detect_aruco()
